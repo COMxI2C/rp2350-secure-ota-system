@@ -22,6 +22,7 @@ async fn main(_spawner: Spawner) {
 
     loop{
         Timer::after_millis(100).await;
+        //this is a template for a secure OTA system, you can add your code here to check for updates and perform the OTA process.
     }   
 }
 
