@@ -35,7 +35,9 @@ docs/adr/
 ```
 
 ---
-**General FlowChart:**
+## Secure OTA Update Flow
+
+```mermaid
 flowchart TD
 
     A[Check for Update] --> B[Transfer Firmware Image]
@@ -51,6 +53,7 @@ flowchart TD
     E -->|Verification Passed| G[Commit Update]
 
     G --> H[Boot Updated Firmware]
+```
 
 
 ## 🔐 Key Features (Planned)
