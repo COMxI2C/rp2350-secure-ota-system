@@ -35,6 +35,23 @@ docs/adr/
 ```
 
 ---
+**General FlowChart:**
+flowchart TD
+
+    A[Check for Update] --> B[Transfer Firmware Image]
+
+    B --> C[Store Firmware in Inactive Slot]
+
+    C --> D[Verify Integrity<br/>SHA-256 / CRC]
+
+    D --> E[Verify Authenticity<br/>Digital Signature]
+
+    E -->|Verification Failed| F[Rollback / Keep Current Firmware]
+
+    E -->|Verification Passed| G[Commit Update]
+
+    G --> H[Boot Updated Firmware]
+
 
 ## 🔐 Key Features (Planned)
 
