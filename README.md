@@ -1,107 +1,128 @@
 # RP2350 Secure OTA System
 
-A secure and resilient **Over-The-Air (OTA) firmware update system** for the RP2350 (Raspberry Pi Pico 2W), designed for real-world embedded deployments where reliability and security are critical.
+A firmware update system for the RP2350 (Raspberry Pi Pico 2W), developed in Rust.
 
-> This is **not just a code example**.
-> This repository focuses on **system design, architecture, and decision-making** before implementation.
+This project investigates the architecture and implementation of a secure OTA update mechanism, with emphasis on firmware image validation, flash memory management, boot control, and recovery from interrupted updates.
 
----
+The initial development focuses on the boot process and storage architecture before integrating the complete wireless update pipeline.
 
-## 🚀 Project Goal
+## Project Objectives
 
-Design and implement a **fault-tolerant and secure OTA update system** that:
+The system is being designed around the following requirements:
 
-* Never bricks the device
-* Survives power loss during updates
-* Guarantees firmware authenticity and integrity
-* Supports rollback using dual firmware slots (A/B)
-* Leverages RP2350 hardware security features
+- **Image integrity:** detect corrupted or incomplete firmware images before execution.
+- **Image authenticity:** verify that firmware originates from a trusted signing authority.
+- **Update recovery:** preserve a bootable firmware image if an update is interrupted.
+- **A/B image management:** write candidate firmware to an inactive storage region without overwriting the currently confirmed image.
+- **Controlled boot selection:** distinguish between confirmed and candidate images, including the handling of unsuccessful trial boots.
+- **Hardware security:** evaluate the security mechanisms available on the RP2350 and their applicability to the boot architecture.
 
----
+These objectives will guide the architectural decisions and implementation. Their guarantees will be established through hardware-level validation and fault-injection testing.
 
-## 🧠 Engineering Approach
+## Engineering Approach
 
-This project follows a **design-first methodology**:
+Development is organized around architecture, implementation, and verification.
 
-1. **Conception** → Requirements, constraints, threat model
-2. **Architecture** → Memory layout, boot flow, system states
-3. **Design Decisions** → Documented using ADRs
-4. **Implementation** → Incremental and validated
+1. **Requirements and constraints:** identify memory, flash, boot, security, and recovery constraints imposed by the RP2350 platform.
+2. **System architecture:** define component responsibilities, boot sequence, image lifecycle, and persistent state.
+3. **Architecture Decision Records:** document design alternatives, trade-offs, and selected approaches.
+4. **Implementation and verification:** implement individual mechanisms and validate their behavior on hardware.
 
-All major decisions are documented under:
+Architecture decisions are maintained in:
 
-```
+```text
 docs/adr/
 ```
 
----
-## Secure OTA Update Flow
+## Update Lifecycle
+
+The following diagram describes the intended update sequence, from image reception to boot confirmation or recovery.
 
 ```mermaid
 flowchart TD
+    A["Update request"] --> B["Receive firmware image"]
+    B --> C["Write to inactive image slot"]
+    C --> D["Verify image integrity"]
+    D --> E["Verify image signature"]
 
-    A[Check for Update] --> B[Transfer Firmware Image]
+    D -->|Invalid| F["Reject candidate"]
+    E -->|Invalid| F
 
-    B --> C[Store Firmware in Inactive Slot]
+    F --> G["Retain confirmed image"]
 
-    C --> D[Verify Integrity<br/>SHA-256 / CRC]
+    E -->|Valid| H["Record candidate in boot metadata"]
+    H --> I["Restart device"]
+    I --> J["Boot candidate image"]
+    J --> K{"Application confirms successful startup?"}
 
-    D --> E[Verify Authenticity<br/>Digital Signature]
+    K -->|Yes| L["Mark candidate as confirmed"]
+    K -->|No| M["Recover previous confirmed image"]
 
-    E -->|Verification Failed| F[Rollback / Keep Current Firmware]
-
-    E -->|Verification Passed| G[Commit Update]
-
-    G --> H[Boot Updated Firmware]
+    L --> N["Normal operation"]
+    M --> N
+    G --> N
 ```
 
+Image integrity and authenticity are treated as separate verification steps. Integrity checking detects unintended modifications, while signature verification establishes whether the image was authorized by a trusted signing key.
 
-## 🔐 Key Features (Planned)
+The boot metadata is part of the update mechanism: it must allow the boot stage to distinguish a confirmed image from an image undergoing trial execution.
 
-* Secure boot integration (leveraging RP2350 Boot ROM)
-* A/B firmware slots with rollback capability
-* Cryptographic verification (SHA-256 + digital signatures)
-* Metadata-based boot decision system
-* Power-loss resilient update mechanism
-* OTA over WiFi (planned)
-* Hardware acceleration usage (SHA engine)
+## Boot Architecture
 
----
+The boot sequence is based on the RP2350 startup process and the bootloader responsibilities defined by the project.
 
-## 🧱 System Overview (High-Level)
-
-```
-Boot ROM (Stage 1 - Hardware)
-        ↓
+```text
+RP2350 Boot ROM
+       |
+       v
 Stage 2 Bootloader
-        ↓
-Metadata Evaluation
-        ↓
-Slot Selection (A/B)
-        ↓
+       |
+       v
+Boot Metadata Evaluation
+       |
+       v
+Firmware Image Selection
+       |
+       +------ Confirmed image
+       |
+       +------ Candidate image (trial boot)
+       |
+       v
 Firmware Execution
 ```
 
-OTA Flow:
+The update path and boot path have different responsibilities.
 
-```
-Download → Write (inactive slot) → Verify → Commit → Reboot
-```
+The update path receives and stores a candidate image, performs the required validation, and updates persistent boot metadata. The boot path evaluates that metadata and determines which image is eligible for execution.
 
----
+This separation is intended to keep update transport and image delivery independent from boot selection.
 
-## ⚙️ Tech Stack
+## Planned Capabilities
 
-* Rust (`no_std`)
-* Async runtime: Embassy
-* Logging: defmt + RTT
-* Target: RP2350 (Raspberry Pi Pico 2W)
+- Dual-image storage and candidate image management.
+- Persistent boot metadata and image state tracking.
+- SHA-256 image digest verification.
+- Digital signature verification.
+- Trial boot and application confirmation.
+- Recovery to the previously confirmed image.
+- WiFi-based firmware delivery.
+- Use of the RP2350 hardware SHA-256 accelerator.
+- Evaluation of OTP-based rollback protection.
 
----
+## Platform and Toolchain
 
-## 📂 Repository Structure
+| Component | Technology |
+|---|---|
+| MCU | RP2350 |
+| Development board | Raspberry Pi Pico 2W |
+| Language | Rust (`no_std`) |
+| Async runtime | Embassy |
+| Logging | `defmt` / RTT |
+| Build system | Cargo |
 
-```
+## Repository Structure
+
+```text
 .
 ├── src/                # Firmware source code
 ├── docs/
@@ -111,51 +132,32 @@ Download → Write (inactive slot) → Verify → Commit → Reboot
 └── README.md
 ```
 
----
+## Development Status
 
-## 🧪 Current Status
+**Current phase: architecture and platform investigation.**
 
-🚧 Early stage — architecture and design phase
+The initial work is focused on:
 
-Initial goals:
+- Understanding the RP2350 boot process and available boot mechanisms.
+- Establishing the application and bootloader memory layout.
+- Evaluating flash storage constraints for an A/B image arrangement.
+- Defining the persistent metadata required for image selection and recovery.
+- Investigating the available hardware support for cryptographic operations.
 
-* Establish boot strategy
-* Define memory layout
-* Design metadata system
-* Validate hardware capabilities
+The complete OTA workflow is not yet implemented. The architecture and its recovery guarantees will be refined as platform constraints are verified.
 
----
+## Future Development
 
-## 🎯 Why This Project?
+The next development steps include:
 
-Modern embedded systems require:
+- Finalizing the image storage and boot metadata contracts.
+- Implementing the image verification pipeline.
+- Developing the firmware signing toolchain.
+- Integrating WiFi-based image transfer.
+- Implementing trial boot, confirmation, and rollback.
+- Testing interrupted flash operations and power-loss recovery.
+- Evaluating OTP-based anti-rollback mechanisms.
 
-* Remote updates
-* Strong security guarantees
-* High reliability in harsh environments
+## License
 
-This project explores how to build such a system **from first principles**, leveraging both hardware and software design.
-
----
-
-## 🤖 Development Strategy
-
-This project is intentionally developed using **multiple AI-assisted perspectives**, with all decisions reviewed and validated by the engineer.
-
-The goal is not automation, but **better engineering judgment**.
-
----
-
-## 📌 Future Work
-
-* Define OTA communication protocol
-* Implement cryptographic validation pipeline
-* Integrate WiFi stack
-* Add rollback protection using OTP
-* Build signing toolchain
-
----
-
-## 📜 License
-
-MIT / Apache-2.0 (TBD)
+MIT / Apache-2.0 (to be determined).
