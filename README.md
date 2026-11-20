@@ -4,7 +4,11 @@ A firmware update system for the RP2350 (Raspberry Pi Pico 2W), developed in Rus
 
 This project investigates the architecture and implementation of a secure OTA update mechanism, with emphasis on firmware image validation, flash memory management, boot control, and recovery from interrupted updates.
 
-The initial development focuses on the boot process and storage architecture before integrating the complete wireless update pipeline.
+The initial development focuses on the boot process and storage architecture before integrating the complete wireless update pipeline. 
+
+To ensure fault tolerance and secure image selection, the system enforces a strict separation between the update delivery mechanisms and the critical boot validation path. The following structural topology illustrates these trust boundaries and component responsibilities:
+
+![Bootloader Structural Architecture](./docs/Bootloader_Structural_Architecture_v2.drawio.svg)
 
 ## Project Objectives
 
