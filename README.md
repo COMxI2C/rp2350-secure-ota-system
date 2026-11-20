@@ -23,6 +23,14 @@ The system is being designed around the following requirements:
 
 These objectives will guide the architectural decisions and implementation. Their guarantees will be established through hardware-level validation and fault-injection testing.
 
+## Design Philosophy: Hardware-Agnostic Architecture
+
+This system is built using a strict **Hexagonal Architecture (Ports and Adapters)**. While implemented in Rust, the structural design is language-agnostic and maps directly to industry-standard C/C++ embedded paradigms.
+
+- **MCU-Agnostic Core:** The update logic, boot state machine, and cryptography (`crates/update-core`, `crates/boot-core`) are entirely isolated from the hardware. They compile independently of the target MCU.
+- **System Ports:** Hardware interactions are abstracted behind pure interfaces (`crates/system-ports`). 
+- **Frictionless Portability:** Porting this OTA system to an STM32, ESP32, or nRF52 requires zero changes to the core logic. It only requires implementing a new `platform-<mcu>` crate to satisfy the system ports.
+  
 ## Engineering Approach
 
 Development is organized around architecture, implementation, and verification.
@@ -75,24 +83,20 @@ The boot metadata is part of the update mechanism: it must allow the boot stage 
 
 The boot sequence is based on the RP2350 startup process and the bootloader responsibilities defined by the project.
 
-```text
-RP2350 Boot ROM
-       |
-       v
-Stage 2 Bootloader
-       |
-       v
-Boot Metadata Evaluation
-       |
-       v
-Firmware Image Selection
-       |
-       +------ Confirmed image
-       |
-       +------ Candidate image (trial boot)
-       |
-       v
-Firmware Execution
+```mermaid
+flowchart TD
+    A["RP2350 Boot ROM"]
+        --> B["Stage 2 Bootloader"]
+        --> C["Boot Metadata Evaluation"]
+
+    C --> D{"Candidate Image Pending?"}
+
+    D -->|"Yes"| E["Select Candidate Image"]
+    D -->|"No"| F["Select Confirmed Image"]
+
+    E --> G["Firmware Execution"]
+    F --> G
+
 ```
 
 The update path and boot path have different responsibilities.
@@ -126,15 +130,36 @@ This separation is intended to keep update transport and image delivery independ
 
 ## Repository Structure
 
+The workspace isolates binary entry points (`firmware/`) from the hardware-agnostic logic (`crates/`). 
+
+<details>
+<summary><b>📂 Click to expand the full architectural workspace tree</b></summary>
+
 ```text
-.
-├── src/                # Firmware source code
-├── docs/
-│   └── adr/            # Architecture Decision Records
-├── memory.x            # Linker script
+rp2350-secure-ota/
 ├── Cargo.toml
-└── README.md
+├── .cargo/
+│   └── config.toml
+│
+├── firmware/             # Executable binary entry points
+│   ├── application/      # Active slot application (main.rs, memory.x)
+│   └── bootloader/       # Secure bootloader (main.rs, memory.x)
+│
+├── crates/               # Hardware-agnostic core logic
+│   ├── update-core/      # OTA session, download, and agent logic
+│   ├── boot-core/        # Image selection, validation, and recovery
+│   ├── boot-contracts/   # Shared memory offsets, structs, and state flags
+│   ├── system-ports/     # Abstract traits (Flash, Crypto, Reset)
+│   ├── platform-rp2350/  # RP2350-specific HAL implementation of system-ports
+│   └── transport/        # Network and serial interfaces (WiFi, UART)
+│
+├── tools/                # Host-side utilities
+│   └── firmware-signer/  # CLI tool for hashing, signing, and packaging OTA images
+│
+├── tests/                # Unit and integration tests (Host & Hardware)
+└── docs/                 # Architecture Decision Records (ADRs) and specs
 ```
+</details>
 
 ## Development Status
 
