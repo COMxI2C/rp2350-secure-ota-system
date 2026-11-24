@@ -1,0 +1,8 @@
+[package]
+name = "platform-rp2350"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embassy-rp = { workspace = true, features = ["unstable-pac"] }

@@ -1,0 +1,19 @@
+[package]
+name = "rp2350-ota-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+
+embassy-executor.workspace = true
+embassy-time.workspace = true
+embassy-rp.workspace = true
+
+panic-probe.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+
+platform-rp2350 = { path = "../../crates/platform-rp2350" }
