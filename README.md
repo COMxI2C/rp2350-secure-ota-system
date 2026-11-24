@@ -1,192 +1,164 @@
 # RP2350 Secure OTA System
 
-A firmware update system for the RP2350 (Raspberry Pi Pico 2W), developed in Rust.
+A portable, fault-tolerant **Secure Over-The-Air (OTA) firmware update and trusted boot architecture** written in **Embedded Rust (`no_std`)**, with an initial reference implementation targeting the **Raspberry Pi RP2350A** (Pico 2 W) and the **Embassy** async runtime.
 
-This project investigates the architecture and implementation of a secure OTA update mechanism, with emphasis on firmware image validation, flash memory management, boot control, and recovery from interrupted updates.
+This repository prioritizes architectural rigor, hardware-independent verifiability, and power-loss resilience: core update policies and boot state machines are decoupled from silicon-specific drivers behind explicit trait boundaries, enabling full **host-based verification** before on-target bring-up.
 
-The initial development focuses on the boot process and storage architecture before integrating the complete wireless update pipeline. 
+---
 
-To ensure fault tolerance and secure image selection, the system enforces a strict separation between the update delivery mechanisms and the critical boot validation path. The following structural topology illustrates these trust boundaries and component responsibilities:
+## Technical Design Specification & ADRs
 
-![Bootloader Structural Architecture](./docs/Bootloader_Structural_Architecture_v2.drawio.svg)
+System requirements, threat model, trust boundaries, dual-state update lifecycle, storage invariants (XIP safety, atomic metadata transitions, 3-image capacity trade-offs), and platform constraints are formally specified in the engineering documentation:
 
-## Project Objectives
+- **Technical Design Specification:** [`docs/TECHNICAL_DESIGN_SPECIFICATION_V1.pdf`](docs/TECHNICAL_DESIGN_SPECIFICATION_V1.pdf)
+- **Architecture Decision Records (ADRs):** [`docs/adr/`](docs/adr/) — tracks open and resolved decisions across Security (`SEC-ADR`), Architecture (`ARCH-ADR`), Storage (`STO-ADR`), and RP2350A Platform (`PLT-ADR`).
 
-The system is being designed around the following requirements:
+---
 
-- **Image integrity:** detect corrupted or incomplete firmware images before execution.
-- **Image authenticity:** verify that firmware originates from a trusted signing authority.
-- **Update recovery:** preserve a bootable firmware image if an update is interrupted.
-- **A/B image management:** write candidate firmware to an inactive storage region without overwriting the currently confirmed image.
-- **Controlled boot selection:** distinguish between confirmed and candidate images, including the handling of unsuccessful trial boots.
-- **Hardware security:** evaluate the security mechanisms available on the RP2350 and their applicability to the boot architecture.
+## System Architecture
 
-These objectives will guide the architectural decisions and implementation. Their guarantees will be established through hardware-level validation and fault-injection testing.
+The architecture enforces a strict trust boundary between the **Application Environment** (untrusted update delivery, staging, and health reporting) and the **Trusted Boot Domain** (independent cryptographic verification, boot selection, trial supervision, and recovery).
 
-## Design Philosophy: Hardware-Agnostic Architecture
+<!-- Replace with the updated architecture diagram path once exported -->
+![System Architecture](./docs/Bootloader_Structural_Architecture_v2.drawio.svg)
 
-This system is built using a strict **Hexagonal Architecture (Ports and Adapters)**. While implemented in Rust, the structural design is language-agnostic and maps directly to industry-standard C/C++ embedded paradigms.
+### Architectural Layering & Host-First Portability
 
-- **MCU-Agnostic Core:** The update logic, boot state machine, and cryptography (`crates/update-core`, `crates/boot-core`) are entirely isolated from the hardware. They compile independently of the target MCU.
-- **System Ports:** Hardware interactions are abstracted behind pure interfaces (`crates/system-ports`). 
-- **Frictionless Portability:** Porting this OTA system to an STM32, ESP32, or nRF52 requires zero changes to the core logic. It only requires implementing a new `platform-<mcu>` crate to satisfy the system ports.
-  
-## Engineering Approach
+Core domain logic is kept strictly independent of the target MCU, flash geometry, and transport stack through trait-based hardware abstraction:
 
-Development is organized around architecture, implementation, and verification.
+- **Core Logic (`boot-core`, `update-core`, `boot-contracts`):** Pure `#![no_std]` state machines, verification policies, and lifecycle invariants. Buildable and testable on the host via `cargo test` using deterministic mocks and fault-injection harnesses.
+- **System Ports (`system-ports`):** Explicit trait boundaries aligned with `embedded-hal` / PAL patterns for non-volatile storage (`Flash Port`), cryptography (`Crypto Port`), reset/watchdog supervision (`System Control & Recovery Port`), and transport (`Transport Port`).
+- **Platform Implementation (`platform-rp2350`):** Silicon-specific drivers leveraging RP2350A peripherals, PAC/HAL abstractions, Embassy async executors, and RAM-resident XIP-safe flash routines.
 
-1. **Requirements and constraints:** identify memory, flash, boot, security, and recovery constraints imposed by the RP2350 platform.
-2. **System architecture:** define component responsibilities, boot sequence, image lifecycle, and persistent state.
-3. **Architecture Decision Records:** document design alternatives, trade-offs, and selected approaches.
-4. **Implementation and verification:** implement individual mechanisms and validate their behavior on hardware.
+---
 
-Architecture decisions are maintained in:
+## Core Design Invariants
 
-```text
-docs/adr/
-```
+- **Independent Boot Verification:** Writing or validating an image in the Application Environment never authorizes execution; the Trusted Boot Domain independently verifies integrity, authenticity, compatibility, and anti-rollback eligibility at boot.
+- **Preservation of Eligible Firmware:** Candidate reception and staging must never overwrite the confirmed fallback image or an active trial image.
+- **Recoverable Persistent Transitions:** Boot metadata updates are designed to tolerate power loss across erase, program, and commit boundaries without exposing torn state.
+- **Bounded Trial Execution & Rollback:** Newly activated candidates run under supervised trial execution (`TRIAL`) and only become `CONFIRMED` upon an authorized persistent commit; failed trials automatically recover to the previously confirmed image.
+- **Monotonic Anti-Rollback:** Security version floors advance only after confirmation and are evaluated for RP2350A OTP-backed persistence.
+
+---
 
 ## Update Lifecycle
 
-The following diagram describes the intended update sequence, from image reception to boot confirmation or recovery.
+The update flow separates untrusted application-level staging from trusted boot-time authorization. Rejecting a candidate at any stage preserves the previously confirmed firmware.
 
 ```mermaid
 flowchart TD
-    A["Update request"] --> B["Receive firmware image"]
-    B --> C["Write to inactive image slot"]
-    C --> D["Verify image integrity"]
-    D --> E["Verify image signature"]
+    subgraph APP ["Application Environment (Untrusted)"]
+        A["Update Request"] --> B["Receive Firmware Image"]
+        B --> C["Stage Candidate Image"]
+        C --> D{"Advisory Integrity &<br/>Authenticity Check"}
+        D -->|Invalid| F["Reject Candidate<br/>(UPDATE_FAILED)"]
+        D -->|Valid| H["Write Untrusted Update<br/>Request Descriptor & Reset"]
+    end
 
-    D -->|Invalid| F["Reject candidate"]
-    E -->|Invalid| F
+    subgraph BOOT ["Trusted Boot Domain"]
+        H --> J{"Independent Boot Verification<br/>(Digest, Signature, Anti-Rollback)"}
+        J -->|Invalid / Ineligible| R["Consume Descriptor &<br/>Preserve Confirmed Image"]
+        J -->|Eligible| K["Commit TRIAL State &<br/>Configure Watchdog Supervision"]
+    end
 
-    F --> G["Retain confirmed image"]
+    K --> T["Execute Candidate in TRIAL"]
+    T --> L{"Confirmation Accepted<br/>by Boot Manager?"}
+    L -->|Yes| M["Commit CONFIRMED State &<br/>Advance Anti-Rollback Floor"]
+    L -->|No / Watchdog Reset| N["Recovery Manager:<br/>Verify & Restore Confirmed Image"]
 
-    E -->|Valid| H["Record candidate in boot metadata"]
-    H --> I["Restart device"]
-    I --> J["Boot candidate image"]
-    J --> K{"Application confirms successful startup?"}
-
-    K -->|Yes| L["Mark candidate as confirmed"]
-    K -->|No| M["Recover previous confirmed image"]
-
-    L --> N["Normal operation"]
-    M --> N
-    G --> N
+    M --> O["Normal Operation"]
+    N --> O
+    R --> O
+    F --> O
 ```
 
-Image integrity and authenticity are treated as separate verification steps. Integrity checking detects unintended modifications, while signature verification establishes whether the image was authorized by a trusted signing key.
+---
 
-The boot metadata is part of the update mechanism: it must allow the boot stage to distinguish a confirmed image from an image undergoing trial execution.
+## Boot Sequence (RP2350A)
 
-## Boot Architecture
-
-The boot sequence is based on the RP2350 startup process and the bootloader responsibilities defined by the project.
+Unlike the RP2040, the RP2350A BootROM natively initializes QSPI/XIP flash and provides hardware-backed Secure Boot and OTP primitives. The Trusted Boot Manager builds directly on top of the RP2350A BootROM startup path:
 
 ```mermaid
 flowchart TD
-    A["RP2350 Boot ROM"]
-        --> B["Stage 2 Bootloader"]
-        --> C["Boot Metadata Evaluation"]
+    A["RP2350A BootROM<br/>(Root of Trust / OTP Verification)"] --> B["Trusted Boot Manager<br/>(Bootloader)"]
+    B --> C{"Hardware Recovery Input<br/>or Unrecoverable Metadata?"}
+    C -->|Yes| G["Recovery Manager<br/>(Authenticated Recovery Path)"]
+    C -->|No| D{"Evaluate Persistent Boot State<br/>& Update Request"}
 
-    C --> D{"Candidate Image Pending?"}
+    D -->|Eligible Trial Candidate| E["Boot Verification:<br/>Verify & Arm TRIAL"]
+    D -->|Confirmed Image| F["Boot Verification:<br/>Verify Confirmed Image"]
+    D -->|No Eligible Image| G
 
-    D -->|"Yes"| E["Select Candidate Image"]
-    D -->|"No"| F["Select Confirmed Image"]
-
-    E --> G["Firmware Execution"]
-    F --> G
-
+    E -->|Pass| H["Transfer Execution to Application"]
+    F -->|Pass| H
+    E -->|Fail| G
+    F -->|Fail| G
 ```
 
-The update path and boot path have different responsibilities.
+---
 
-The update path receives and stores a candidate image, performs the required validation, and updates persistent boot metadata. The boot path evaluates that metadata and determines which image is eligible for execution.
+## Platform & Toolchain
 
-This separation is intended to keep update transport and image delivery independent from boot selection.
+| Component | Technology / Specification |
+| :--- | :--- |
+| **Microcontroller** | Raspberry Pi RP2350A (Dual-core **ARM Cortex-M33** / **Hazard3 RISC-V**) |
+| **Reference Board** | Raspberry Pi Pico 2 W (520 KB SRAM, 4 MB QSPI Flash, 8 KB OTP, CYW43439 Wi-Fi) |
+| **Language** | Rust (`#![no_std]`) |
+| **Async Runtime** | Embassy (`embassy-executor`, `embassy-sync`, `embassy-time`, `embassy-net`, `embassy-rp`) |
+| **Hardware Abstraction** | `embedded-hal` traits, PACs, custom `system-ports` |
+| **Debugging & Logging** | SWD, `probe-rs`, `defmt` / RTT |
+| **Verification** | Host-based unit & fault-injection test suites (`cargo test`) + on-target validation |
 
-## Planned Capabilities
-
-- Dual-image storage and candidate image management.
-- Persistent boot metadata and image state tracking.
-- SHA-256 image digest verification.
-- Digital signature verification.
-- Trial boot and application confirmation.
-- Recovery to the previously confirmed image.
-- WiFi-based firmware delivery.
-- Use of the RP2350 hardware SHA-256 accelerator.
-- Evaluation of OTP-based rollback protection.
-
-## Platform and Toolchain
-
-| Component | Technology |
-|---|---|
-| MCU | RP2350 |
-| Development board | Raspberry Pi Pico 2W |
-| Language | Rust (`no_std`) |
-| Async runtime | Embassy |
-| Logging | `defmt` / RTT |
-| Build system | Cargo |
+---
 
 ## Repository Structure
 
-The workspace isolates binary entry points (`firmware/`) from the hardware-agnostic logic (`crates/`). 
+The workspace separates firmware entry points, core logic, platform implementations, and supporting tools.
 
 <details>
-<summary><b>📂 Click to expand the full architectural workspace tree</b></summary>
+<summary><b>📂 Repository workspace</b></summary>
 
 ```text
-rp2350-secure-ota/
+rp2350-secure-ota-system/
 ├── Cargo.toml
 ├── .cargo/
 │   └── config.toml
-│
-├── firmware/             # Executable binary entry points
-│   ├── application/      # Active slot application (main.rs, memory.x)
-│   └── bootloader/       # Secure bootloader (main.rs, memory.x)
-│
-├── crates/               # Hardware-agnostic core logic
-│   ├── update-core/      # OTA session, download, and agent logic
-│   ├── boot-core/        # Image selection, validation, and recovery
-│   ├── boot-contracts/   # Shared memory offsets, structs, and state flags
-│   ├── system-ports/     # Abstract traits (Flash, Crypto, Reset)
-│   ├── platform-rp2350/  # RP2350-specific HAL implementation of system-ports
-│   └── transport/        # Network and serial interfaces (WiFi, UART)
-│
-├── tools/                # Host-side utilities
-│   └── firmware-signer/  # CLI tool for hashing, signing, and packaging OTA images
-│
-├── tests/                # Unit and integration tests (Host & Hardware)
-└── docs/                 # Architecture Decision Records (ADRs) and specs
+├── firmware/
+│   ├── application/            # Pico 2 W application & OTA client
+│   └── bootloader/             # Trusted Boot Domain entry point
+├── crates/
+│   ├── boot-core/              # Platform-independent boot policy & state machine 
+│   ├── update-core/            # Update coordinator & session core 
+│   ├── boot-contracts/         # Shared manifests, descriptors & metadata schemas
+│   ├── system-ports/           # Hardware abstraction traits (Flash, Crypto, Reset, Transport)
+│   ├── platform-rp2350/        # RP2350A drivers, XIP-safe flash routines & OTP bindings
+│   └── transport/              # Transport adapters (CYW43439 Wi-Fi / UART)
+├── tools/
+│   └── firmware-signer/        # Host CLI for deterministic image manifest & signature generation
+├── tests/                      # Host-based integration & power-loss fault-injection suites
+└── docs/
+    ├── adr/                    # Formal Architecture Decision Records
+    └── TECHNICAL_DESIGN_SPECIFICATION_V1.pdf
 ```
+
 </details>
 
-## Development Status
+---
 
-**Current phase: architecture and platform investigation.**
+## Engineering Roadmap & Milestones
 
-The initial work is focused on:
+Development follows a disciplined, specification-first workflow (Requirements $\rightarrow$ Architecture $\rightarrow$ ADRs $\rightarrow$ Host Verification $\rightarrow$ Silicon Bring-up):
 
-- Understanding the RP2350 boot process and available boot mechanisms.
-- Establishing the application and bootloader memory layout.
-- Evaluating flash storage constraints for an A/B image arrangement.
-- Defining the persistent metadata required for image selection and recovery.
-- Investigating the available hardware support for cryptographic operations.
+- [x] **Phase 1 — Architecture & Specification:** System requirements, threat model, trust boundaries, dual-state lifecycle, storage invariants, and RP2350A platform constraints (TDS v0.1).
+- [x] **Phase 2 — Workspace & Contracts:** Cargo workspace scaffolding, `system-ports` trait boundaries, and ADR baseline.
+- [ ] **Phase 3 — Host-Verified Core Logic:** Implement `boot-core` and `update-core` state machines with full host-based unit tests and simulated power-loss fault injection.
+- [ ] **Phase 4 — RP2350A Storage & Boot Bring-up:** Resolve `STO-ADR` / `PLT-ADR` (BootROM boundary, 4 MB flash partition map, RAM-resident XIP-safe flash routines, and transactional metadata).
+- [ ] **Phase 5 — Cryptographic Verification & Anti-Rollback:** Integrate SHA-256 / signature verification (`firmware-signer` + on-target `Boot Verification`) and evaluate RP2350A OTP monotonic counters.
+- [ ] **Phase 6 — Wireless OTA Integration:** Integrate `embassy-net` / CYW43439 transport with chunked, XIP-stall-tolerant reception and end-to-end trial/rollback validation on Pico 2 W.
 
-The complete OTA workflow is not yet implemented. The architecture and its recovery guarantees will be refined as platform constraints are verified.
-
-## Future Development
-
-The next development steps include:
-
-- Finalizing the image storage and boot metadata contracts.
-- Implementing the image verification pipeline.
-- Developing the firmware signing toolchain.
-- Integrating WiFi-based image transfer.
-- Implementing trial boot, confirmation, and rollback.
-- Testing interrupted flash operations and power-loss recovery.
-- Evaluating OTP-based anti-rollback mechanisms.
+---
 
 ## License
 
-MIT / Apache-2.0 (to be determined).
+Dual-licensed under **MIT** or **Apache-2.0**, at your option (`MIT OR Apache-2.0`).
